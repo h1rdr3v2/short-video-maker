@@ -8,7 +8,13 @@ Content-Type: application/json
     "scenes": [
       {
         "text": "hello world",
-        "searchTerms": ["rain"]
+        "searchTerms": ["rain"],
+        "backgroundVideo": {
+          "src": "https://example.com/video.mp4",
+          "loop": 1,
+          "seek": 5,
+          "resize": "cover"
+        }
       }
     ],
     "config": {

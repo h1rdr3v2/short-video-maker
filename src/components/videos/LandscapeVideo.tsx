@@ -62,6 +62,7 @@ export const LandscapeVideo: React.FC<z.infer<typeof shortVideoSchema>> = ({
 
       {scenes.map((scene, i) => {
         const { captions, audio, video } = scene;
+        const videoSrc = scene.backgroundVideo?.src || video;
         const pages = createCaptionPages({
           captions,
           lineMaxLength: 30,
@@ -88,7 +89,20 @@ export const LandscapeVideo: React.FC<z.infer<typeof shortVideoSchema>> = ({
             durationInFrames={durationInFrames}
             key={`scene-${i}`}
           >
-            <OffthreadVideo src={video} muted />
+            <AbsoluteFill>
+              <OffthreadVideo
+                src={videoSrc}
+                muted
+                style={{
+                  width: "100%",
+                  height: "100%",
+                  objectFit:
+                    (scene.backgroundVideo
+                      ?.resize as React.CSSProperties["objectFit"]) || "cover",
+                }}
+                {...(scene.backgroundVideo?.loop ? { loop: true } : {})}
+              />
+            </AbsoluteFill>
             <Audio src={audio.url} />
             {pages.map((page, j) => {
               return (

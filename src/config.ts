@@ -34,6 +34,7 @@ export class Config {
   public installationSuccessfulPath: string;
   public whisperInstallPath: string;
   public videosDirPath: string;
+  public videoCacheDirPath: string;
   public tempDirPath: string;
   public packageDirPath: string;
   public musicDirPath: string;
@@ -53,12 +54,14 @@ export class Config {
 
   constructor() {
     this.dataDirPath =
-      process.env.DATA_DIR_PATH ||
-      path.join(os.homedir(), ".ai-agents-az-video-generator");
+      typeof process.env.DATA_DIR_PATH == "string"
+        ? path.resolve(process.env.DATA_DIR_PATH)
+        : path.join(os.homedir(), ".ai-agents-az-video-generator");
     this.libsDirPath = path.join(this.dataDirPath, "libs");
 
     this.whisperInstallPath = path.join(this.libsDirPath, "whisper");
     this.videosDirPath = path.join(this.dataDirPath, "videos");
+    this.videoCacheDirPath = path.join(this.dataDirPath, "video-cache");
     this.tempDirPath = path.join(this.dataDirPath, "temp");
     this.installationSuccessfulPath = path.join(
       this.dataDirPath,
@@ -68,6 +71,7 @@ export class Config {
     fs.ensureDirSync(this.dataDirPath);
     fs.ensureDirSync(this.libsDirPath);
     fs.ensureDirSync(this.videosDirPath);
+    fs.ensureDirSync(this.videoCacheDirPath);
     fs.ensureDirSync(this.tempDirPath);
 
     this.packageDirPath = path.join(__dirname, "..");
@@ -109,4 +113,6 @@ export class Config {
   }
 }
 
-export const KOKORO_MODEL = "onnx-community/Kokoro-82M-v1.0-ONNX";
+// export const KOKORO_MODEL = "onnx-community/Kokoro-82M-v1.0-ONNX";
+
+export const KOKORO_MODEL = path.resolve("models/Kokoro-82M-v1.0-ONNX");

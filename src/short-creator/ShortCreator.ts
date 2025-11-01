@@ -1,10 +1,11 @@
-import { OrientationEnum } from "./../types/shorts";
+import { OrientationEnum } from "../types/shorts";
 /* eslint-disable @remotion/deterministic-randomness */
 import fs from "fs-extra";
 import cuid from "cuid";
 import path from "path";
 import https from "https";
 import http from "http";
+import { createHash } from "crypto";
 
 import { Kokoro } from "./libraries/Kokoro";
 import { Remotion } from "./libraries/Remotion";
@@ -137,46 +138,103 @@ export class ShortCreator {
       const captions = await this.whisper.CreateCaption(tempWavPath);
 
       await this.ffmpeg.saveToMp3(audioStream, tempMp3Path);
-      const video = await this.pexelsApi.findVideo(
-        scene.searchTerms,
-        audioLength,
-        excludeVideoIds,
-        orientation,
+      // Support optional custom video URL per scene (scene.videoUrl). If provided, skip Pexels lookup.
+      let videoUrlToDownload: string | null = null;
+      let videoIdForExclude: string | undefined;
+
+      if (scene.backgroundVideo?.src) {
+        videoUrlToDownload = scene.backgroundVideo.src;
+        // Create a deterministic id/hash for this custom URL so we can still track exclusions
+        const hash = createHash("sha256")
+          .update(videoUrlToDownload)
+          .digest("hex");
+        videoIdForExclude = `custom-${hash.substring(0, 12)}`;
+      } else {
+        const video = await this.pexelsApi.findVideo(
+          scene.searchTerms || [],
+          audioLength,
+          excludeVideoIds,
+          orientation,
+        );
+        videoUrlToDownload = video.url;
+        videoIdForExclude = video.id;
+      }
+
+      if (!videoUrlToDownload) {
+        throw new Error("No video URL available for scene");
+      }
+
+      logger.debug(
+        `Downloading video from ${videoUrlToDownload} to ${tempVideoPath}`,
       );
 
-      logger.debug(`Downloading video from ${video.url} to ${tempVideoPath}`);
+      // Caching: compute cache filename from URL hash + extension
+      const urlPath = new URL(videoUrlToDownload).pathname;
+      const ext = path.extname(urlPath) || ".mp4";
+      const urlHash = createHash("sha256")
+        .update(videoUrlToDownload)
+        .digest("hex");
+      const cacheFileName = `${urlHash}${ext}`;
+      const cacheFilePath = path.join(
+        this.config.videoCacheDirPath,
+        cacheFileName,
+      );
 
-      await new Promise<void>((resolve, reject) => {
-        const fileStream = fs.createWriteStream(tempVideoPath);
-        https
-          .get(video.url, (response: http.IncomingMessage) => {
-            if (response.statusCode !== 200) {
-              reject(
-                new Error(`Failed to download video: ${response.statusCode}`),
-              );
-              return;
-            }
+      // Check if we have a valid cached version
+      if (this.validateCachedFile(cacheFilePath)) {
+        logger.debug({ cacheFilePath }, "Using cached video file");
+        // copy cached file into temp so Remotion can read from /api/tmp
+        fs.copyFileSync(cacheFilePath, tempVideoPath);
+      } else {
+        // download into temp path, then copy to cache atomically
+        await new Promise<void>((resolve, reject) => {
+          const fileStream = fs.createWriteStream(tempVideoPath);
+          const getter = videoUrlToDownload!.startsWith("https") ? https : http;
+          getter
+            .get(videoUrlToDownload!, (response: http.IncomingMessage) => {
+              if (response.statusCode !== 200) {
+                reject(
+                  new Error(`Failed to download video: ${response.statusCode}`),
+                );
+                return;
+              }
 
-            response.pipe(fileStream);
+              response.pipe(fileStream);
 
-            fileStream.on("finish", () => {
-              fileStream.close();
-              logger.debug(`Video downloaded successfully to ${tempVideoPath}`);
-              resolve();
+              fileStream.on("finish", async () => {
+                fileStream.close();
+                logger.debug(
+                  `Video downloaded successfully to ${tempVideoPath}`,
+                );
+                // Atomically write to cache
+                await this.writeToCacheAtomic(tempVideoPath, cacheFilePath);
+                // Evict old cache entries if needed
+                await this.evictCacheIfNeeded();
+                resolve();
+              });
+            })
+            .on("error", (err: Error) => {
+              fs.unlink(tempVideoPath, () => {}); // Delete the file if download failed
+              logger.error(err, "Error downloading video:");
+              reject(err);
             });
-          })
-          .on("error", (err: Error) => {
-            fs.unlink(tempVideoPath, () => {}); // Delete the file if download failed
-            logger.error(err, "Error downloading video:");
-            reject(err);
-          });
-      });
+        });
+      }
 
-      excludeVideoIds.push(video.id);
+      if (videoIdForExclude) {
+        excludeVideoIds.push(videoIdForExclude);
+      }
 
       scenes.push({
         captions,
         video: `http://localhost:${this.config.port}/api/tmp/${tempVideoFileName}`,
+        backgroundVideo: {
+          src: `http://localhost:${this.config.port}/api/tmp/${tempVideoFileName}`,
+          loop:
+            scene.backgroundVideo?.loop ?? (scene.backgroundVideo?.src ? 1 : 0),
+          seek: scene.backgroundVideo?.seek ?? 0,
+          resize: scene.backgroundVideo?.resize ?? "cover",
+        },
         audio: {
           url: `http://localhost:${this.config.port}/api/tmp/${tempMp3FileName}`,
           duration: audioLength,
@@ -293,5 +351,138 @@ export class ShortCreator {
 
   public ListAvailableVoices(): string[] {
     return this.kokoro.listAvailableVoices();
+  }
+
+  /**
+   * Validate if a cached file exists and has a reasonable size
+   */
+  private validateCachedFile(cacheFilePath: string): boolean {
+    try {
+      if (!fs.existsSync(cacheFilePath)) {
+        return false;
+      }
+      const stats = fs.statSync(cacheFilePath);
+      // Check if file has some content (at least 1KB)
+      if (stats.size < 1024) {
+        logger.warn(
+          { cacheFilePath, size: stats.size },
+          "Cached file is too small, removing",
+        );
+        fs.removeSync(cacheFilePath);
+        return false;
+      }
+      return true;
+    } catch (err) {
+      logger.warn({ err, cacheFilePath }, "Error validating cached file");
+      return false;
+    }
+  }
+
+  /**
+   * Write file to cache atomically to prevent corruption from concurrent writes
+   */
+  private async writeToCacheAtomic(
+    sourcePath: string,
+    cacheFilePath: string,
+  ): Promise<void> {
+    try {
+      // Ensure cache directory exists
+      fs.ensureDirSync(this.config.videoCacheDirPath);
+
+      // Write to a temporary file first
+      const tempCachePath = `${cacheFilePath}.tmp`;
+      fs.copyFileSync(sourcePath, tempCachePath);
+
+      // Atomically rename to final location
+      fs.renameSync(tempCachePath, cacheFilePath);
+      logger.debug({ cacheFilePath }, "Cached downloaded video");
+    } catch (err) {
+      logger.warn({ err, cacheFilePath }, "Failed to write cache file");
+      // Clean up temp file if it exists
+      try {
+        const tempCachePath = `${cacheFilePath}.tmp`;
+        if (fs.existsSync(tempCachePath)) {
+          fs.removeSync(tempCachePath);
+        }
+      } catch {
+        // Ignore cleanup errors
+      }
+    }
+  }
+
+  /**
+   * Evict old cache entries if cache size exceeds limit
+   */
+  private async evictCacheIfNeeded(): Promise<void> {
+    if (!this.config.videoCacheSizeInBytes) {
+      return; // No limit set
+    }
+
+    try {
+      // Ensure cache directory exists
+      if (!fs.existsSync(this.config.videoCacheDirPath)) {
+        return;
+      }
+
+      const cacheFiles = fs.readdirSync(this.config.videoCacheDirPath);
+      const fileStats: Array<{ path: string; size: number; mtime: Date }> = [];
+      let totalSize = 0;
+
+      for (const file of cacheFiles) {
+        // Skip temp files
+        if (file.endsWith(".tmp")) {
+          continue;
+        }
+
+        const filePath = path.join(this.config.videoCacheDirPath, file);
+        try {
+          const stats = fs.statSync(filePath);
+          if (stats.isFile()) {
+            fileStats.push({
+              path: filePath,
+              size: stats.size,
+              mtime: stats.mtime,
+            });
+            totalSize += stats.size;
+          }
+        } catch (err) {
+          // Skip files we can't stat
+          logger.warn({ err, file }, "Error reading cache file stats");
+        }
+      }
+
+      // If under limit, no eviction needed
+      if (totalSize <= this.config.videoCacheSizeInBytes) {
+        logger.debug(
+          { totalSize, limit: this.config.videoCacheSizeInBytes },
+          "Cache within size limit",
+        );
+        return;
+      }
+
+      // Sort by modification time (oldest first) for LRU eviction
+      fileStats.sort((a, b) => a.mtime.getTime() - b.mtime.getTime());
+
+      // Remove oldest files until we're under the limit
+      let currentSize = totalSize;
+      for (const file of fileStats) {
+        if (currentSize <= this.config.videoCacheSizeInBytes) {
+          break;
+        }
+
+        try {
+          fs.removeSync(file.path);
+          currentSize -= file.size;
+          logger.debug(
+            { file: file.path, size: file.size, newTotal: currentSize },
+            "Evicted cache file",
+          );
+        } catch (err) {
+          logger.warn({ err, file: file.path }, "Error evicting cache file");
+        }
+      }
+    } catch (err) {
+      logger.warn({ err }, "Error during cache eviction");
+    }
   }
 }

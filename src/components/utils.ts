@@ -17,6 +17,14 @@ export const shortVideoSchema = z.object({
         duration: z.number(),
       }),
       video: z.string(),
+      backgroundVideo: z
+        .object({
+          src: z.string(),
+          loop: z.number().optional(),
+          seek: z.number().optional(),
+          resize: z.string().optional(),
+        })
+        .optional(),
     }),
   ),
   config: z.object({

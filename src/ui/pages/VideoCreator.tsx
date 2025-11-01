@@ -33,12 +33,13 @@ import {
 interface SceneFormData {
   text: string;
   searchTerms: string; // Changed to string
+  videoUrl?: string; // optional custom video URL
 }
 
 const VideoCreator: React.FC = () => {
   const navigate = useNavigate();
   const [scenes, setScenes] = useState<SceneFormData[]>([
-    { text: "", searchTerms: "" },
+    { text: "", searchTerms: "", videoUrl: "" },
   ]);
   const [config, setConfig] = useState<RenderConfig>({
     paddingBack: 1500,
@@ -112,13 +113,26 @@ const VideoCreator: React.FC = () => {
 
     try {
       // Convert scenes to the expected API format
-      const apiScenes: SceneInput[] = scenes.map((scene) => ({
-        text: scene.text,
-        searchTerms: scene.searchTerms
+      const apiScenes: SceneInput[] = scenes.map((scene) => {
+        const searchTerms = (scene.searchTerms || "")
           .split(",")
           .map((term) => term.trim())
-          .filter((term) => term.length > 0),
-      }));
+          .filter((term) => term.length > 0);
+
+        const result: any = { text: scene.text, searchTerms };
+
+        // If user provided a custom video URL, expose it as a structured backgroundVideo object
+        if (scene.videoUrl && scene.videoUrl.length > 0) {
+          result.backgroundVideo = {
+            src: scene.videoUrl,
+            loop: 1,
+            seek: 0,
+            resize: "cover",
+          };
+        }
+
+        return result as SceneInput;
+      });
 
       const response = await axios.post("/api/short-video", {
         scenes: apiScenes,
@@ -208,7 +222,18 @@ const VideoCreator: React.FC = () => {
                     handleSceneChange(index, "searchTerms", e.target.value)
                   }
                   helperText="Enter keywords for background video, separated by commas"
-                  required
+                />
+              </Grid>
+
+              <Grid item xs={12}>
+                <TextField
+                  fullWidth
+                  label="Custom Video URL (optional)"
+                  value={scene.videoUrl || ""}
+                  onChange={(e) =>
+                    handleSceneChange(index, "videoUrl", e.target.value)
+                  }
+                  helperText="Optional direct URL to a background video (http(s)://... ). If provided, search terms are ignored for this scene."
                 />
               </Grid>
             </Grid>

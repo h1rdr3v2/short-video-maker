@@ -147,11 +147,7 @@ export class PexelsAPI {
           timeout,
         );
       } catch (error: unknown) {
-        if (
-          error instanceof Error &&
-          error instanceof DOMException &&
-          error.name === "TimeoutError"
-        ) {
+        if (error instanceof DOMException && error.name === "TimeoutError") {
           if (retryCounter < retryTimes) {
             logger.warn(
               { searchTerm, retryCounter },

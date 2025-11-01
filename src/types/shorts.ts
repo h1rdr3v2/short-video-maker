@@ -24,6 +24,13 @@ export enum CaptionPositionEnum {
 export type Scene = {
   captions: Caption[];
   video: string;
+  // Optional structured background video descriptor (keeps metadata consistent across UI & API)
+  backgroundVideo?: {
+    src: string;
+    loop?: number; // 0 or 1
+    seek?: number; // seconds to seek into the source
+    resize?: string; // e.g. 'cover' | 'contain'
+  };
   audio: {
     url: string;
     duration: number;
@@ -34,9 +41,28 @@ export const sceneInput = z.object({
   text: z.string().describe("Text to be spoken in the video"),
   searchTerms: z
     .array(z.string())
+    .optional()
     .describe(
       "Search term for video, 1 word, and at least 2-3 search terms should be provided for each scene. Make sure to match the overall context with the word - regardless what the video search result would be.",
     ),
+  // Optional structured background video descriptor (preferred over plain URL)
+  backgroundVideo: z
+    .object({
+      src: z.string().url().describe("Video URL (http(s)://... )"),
+      loop: z
+        .number()
+        .optional()
+        .describe("0 or 1 - whether to loop the source video"),
+      seek: z
+        .number()
+        .optional()
+        .describe("Seconds to seek into source video before using"),
+      resize: z
+        .string()
+        .optional()
+        .describe("Resize mode, e.g. 'cover' or 'contain'"),
+    })
+    .optional(),
 });
 export type SceneInput = z.infer<typeof sceneInput>;
 
@@ -143,7 +169,27 @@ export type CaptionPage = {
 };
 
 export const createShortInput = z.object({
-  scenes: z.array(sceneInput).describe("Each scene to be created"),
+  scenes: z
+    .array(sceneInput)
+    .describe("Each scene to be created")
+    .superRefine((val, ctx) => {
+      // Ensure each scene has either searchTerms (non-empty) or a backgroundVideo
+      val.forEach((scene, i) => {
+        const hasSearchTerms =
+          Array.isArray(scene.searchTerms) && scene.searchTerms.length > 0;
+        const hasBackgroundVideo =
+          !!scene.backgroundVideo &&
+          scene.backgroundVideo.src.length > 0;
+        if (!hasSearchTerms && !hasBackgroundVideo) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            path: [i],
+            message:
+              "Each scene must have either searchTerms (array) or a backgroundVideo.src",
+          });
+        }
+      });
+    }),
   config: renderConfig.describe("Configuration for rendering the video"),
 });
 export type CreateShortInput = z.infer<typeof createShortInput>;
