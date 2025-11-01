@@ -25,6 +25,58 @@ import type {
   MusicForVideo,
 } from "../types/shorts";
 
+/**
+ * Converts Google Drive view URLs to direct download URLs.
+ * Supports formats:
+ * - https://drive.google.com/file/d/{FILE_ID}/view
+ * - https://drive.google.com/file/d/{FILE_ID}/view?usp=sharing
+ * - https://drive.google.com/open?id={FILE_ID}
+ *
+ * Note: For large files, Google Drive may show a virus scan warning.
+ * The URL format with 'confirm=t' bypasses this for direct downloads.
+ */
+function convertGoogleDriveUrl(url: string): string {
+  try {
+    const urlObj = new URL(url);
+
+    // Check if it's a Google Drive URL
+    if (!urlObj.hostname.includes("drive.google.com")) {
+      return url;
+    }
+
+    // Extract file ID from various Google Drive URL formats
+    let fileId: string | null = null;
+
+    // Format: /file/d/{FILE_ID}/view
+    const filePathMatch = urlObj.pathname.match(/\/file\/d\/([^/]+)/);
+    if (filePathMatch) {
+      fileId = filePathMatch[1];
+    }
+
+    // Format: /open?id={FILE_ID}
+    if (!fileId && urlObj.searchParams.has("id")) {
+      fileId = urlObj.searchParams.get("id");
+    }
+
+    if (fileId) {
+      // Use the more reliable download URL format that works with larger files
+      // 'confirm=t' bypasses the virus scan warning page
+      const directUrl = `https://drive.usercontent.google.com/download?id=${fileId}&export=download&confirm=t`;
+      logger.debug(
+        { originalUrl: url, directUrl },
+        "Converted Google Drive view URL to direct download URL",
+      );
+      return directUrl;
+    }
+
+    // If we can't parse it, return original URL
+    return url;
+  } catch {
+    // If URL parsing fails, return original
+    return url;
+  }
+}
+
 export class ShortCreator {
   private queue: {
     sceneInput: SceneInput[];
@@ -143,7 +195,7 @@ export class ShortCreator {
       let videoIdForExclude: string | undefined;
 
       if (scene.backgroundVideo?.src) {
-        videoUrlToDownload = scene.backgroundVideo.src;
+        videoUrlToDownload = convertGoogleDriveUrl(scene.backgroundVideo.src);
         // Create a deterministic id/hash for this custom URL so we can still track exclusions
         const hash = createHash("sha256")
           .update(videoUrlToDownload)
@@ -188,36 +240,98 @@ export class ShortCreator {
       } else {
         // download into temp path, then copy to cache atomically
         await new Promise<void>((resolve, reject) => {
-          const fileStream = fs.createWriteStream(tempVideoPath);
-          const getter = videoUrlToDownload!.startsWith("https") ? https : http;
-          getter
-            .get(videoUrlToDownload!, (response: http.IncomingMessage) => {
-              if (response.statusCode !== 200) {
-                reject(
-                  new Error(`Failed to download video: ${response.statusCode}`),
-                );
-                return;
-              }
+          const downloadFile = (url: string, redirectCount = 0) => {
+            const MAX_REDIRECTS = 5;
 
-              response.pipe(fileStream);
+            if (redirectCount > MAX_REDIRECTS) {
+              reject(new Error("Too many redirects"));
+              return;
+            }
 
-              fileStream.on("finish", async () => {
+            const fileStream = fs.createWriteStream(tempVideoPath);
+            const parsedUrl = new URL(url);
+            const getter = url.startsWith("https") ? https : http;
+
+            // Prepare request options with headers to mimic a browser
+            const options = {
+              hostname: parsedUrl.hostname,
+              port: parsedUrl.port,
+              path: parsedUrl.pathname + parsedUrl.search,
+              method: "GET",
+              headers: {
+                "User-Agent":
+                  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                Accept: "*/*",
+                "Accept-Encoding": "identity",
+                Connection: "keep-alive",
+              },
+              timeout: 30000, // 30 second timeout
+            };
+
+            const request = getter
+              .get(options, (response: http.IncomingMessage) => {
+                // Handle redirects (301, 302, 303, 307, 308)
+                if (
+                  response.statusCode &&
+                  response.statusCode >= 300 &&
+                  response.statusCode < 400 &&
+                  response.headers.location
+                ) {
+                  logger.debug(
+                    {
+                      statusCode: response.statusCode,
+                      location: response.headers.location,
+                    },
+                    "Following redirect",
+                  );
+                  fileStream.close();
+                  fs.unlink(tempVideoPath, () => {}); // Clean up partial file
+                  downloadFile(response.headers.location, redirectCount + 1);
+                  return;
+                }
+
+                if (response.statusCode !== 200) {
+                  fileStream.close();
+                  fs.unlink(tempVideoPath, () => {});
+                  reject(
+                    new Error(
+                      `Failed to download video: ${response.statusCode}`,
+                    ),
+                  );
+                  return;
+                }
+
+                response.pipe(fileStream);
+
+                fileStream.on("finish", async () => {
+                  fileStream.close();
+                  logger.debug(
+                    `Video downloaded successfully to ${tempVideoPath}`,
+                  );
+                  // Atomically write to cache
+                  await this.writeToCacheAtomic(tempVideoPath, cacheFilePath);
+                  // Evict old cache entries if needed
+                  await this.evictCacheIfNeeded();
+                  resolve();
+                });
+              })
+              .on("error", (err: Error) => {
                 fileStream.close();
-                logger.debug(
-                  `Video downloaded successfully to ${tempVideoPath}`,
+                fs.unlink(tempVideoPath, () => {}); // Delete the file if download failed
+                logger.error(err, "Error downloading video:");
+                reject(err);
+              })
+              .on("timeout", () => {
+                request.destroy();
+                fileStream.close();
+                fs.unlink(tempVideoPath, () => {});
+                reject(
+                  new Error("Download request timed out after 30 seconds"),
                 );
-                // Atomically write to cache
-                await this.writeToCacheAtomic(tempVideoPath, cacheFilePath);
-                // Evict old cache entries if needed
-                await this.evictCacheIfNeeded();
-                resolve();
               });
-            })
-            .on("error", (err: Error) => {
-              fs.unlink(tempVideoPath, () => {}); // Delete the file if download failed
-              logger.error(err, "Error downloading video:");
-              reject(err);
-            });
+          };
+
+          downloadFile(videoUrlToDownload!);
         });
       }
 
