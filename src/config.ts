@@ -113,6 +113,6 @@ export class Config {
   }
 }
 
-// export const KOKORO_MODEL = "onnx-community/Kokoro-82M-v1.0-ONNX";
-
-export const KOKORO_MODEL = path.resolve("models/Kokoro-82M-v1.0-ONNX");
+export const KOKORO_MODEL = process.env.DEV
+  ? path.resolve("models/Kokoro-82M-v1.0-ONNX")
+  : "onnx-community/Kokoro-82M-v1.0-ONNX";
