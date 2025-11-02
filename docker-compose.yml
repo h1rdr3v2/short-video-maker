@@ -5,10 +5,13 @@ services:
     build:
       context: .
       dockerfile: main.Dockerfile
-    env_file:
-      - .env
+#    env_file:
+#      - .env
     environment:
       - DEV=false
-    ports:
-      - "3123:3123"
+      - LOG_LEVEL=trace
+      - WHISPER_VERBOSE=true
+      - DATA_DIR_PATH=data
+#    ports:
+#      - "3123:3123"
     entrypoint: ["node", "dist/index.js"]
